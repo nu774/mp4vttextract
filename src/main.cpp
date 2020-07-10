@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <unistd.h>
 #include "libplatform/endian.h"
 #include "src/impl.h"
 
@@ -63,22 +64,30 @@ std::vector<vtt_cue_t> parseVTTSample(const uint8_t *data, uint32_t size)
     return res;
 }
 
-int findVTTTextTrack(mp4v2::impl::MP4File &file)
+bool isVTTTextTrack(mp4v2::impl::MP4File &file, int tid)
+{
+    mp4v2::impl::MP4Track *track = file.GetTrack(tid);
+    const char *hdlr = track->GetType();
+    if (std::strcmp(hdlr, "text"))
+        return false;
+    mp4v2::impl::MP4Atom &trakAtom = track->GetTrakAtom();
+    mp4v2::impl::MP4Atom *stsd = trakAtom.FindChildAtom("mdia.minf.stbl.stsd");
+    if (!stsd)
+        return false;
+    mp4v2::impl::MP4Atom *descAtom = stsd->GetChildAtom(0);
+    const char *descName = descAtom->GetType();
+    return !std::strcmp(descName, "svtt") || !std::strcmp(descName, "wvtt");
+}
+
+int findVTTTextTrack(mp4v2::impl::MP4File &file, int desiredTrack)
 {
     int ntracks = file.GetNumberOfTracks();
-    int tid = 1;
-    for (; tid <= ntracks; ++tid) {
-        mp4v2::impl::MP4Track *track = file.GetTrack(tid);
-        const char *hdlr = track->GetType();
-        if (std::strcmp(hdlr, "text")) continue;
-        mp4v2::impl::MP4Atom &trakAtom = track->GetTrakAtom();
-        mp4v2::impl::MP4Atom *stsd = trakAtom.FindChildAtom("mdia.minf.stbl.stsd");
-        if (!stsd) continue;
-        mp4v2::impl::MP4Atom *descAtom = stsd->GetChildAtom(0);
-        const char *descName = descAtom->GetType();
-        if (std::strcmp(descName, "svtt") == 0 || std::strcmp(descName, "wvtt") == 0)
-            return tid;
+    if (desiredTrack > 0) {
+        return isVTTTextTrack(file, desiredTrack) ? desiredTrack : 0;
     }
+    for (int tid = 1; tid <= ntracks; ++tid)
+        if (isVTTTextTrack(file, tid))
+            return tid;
     return 0;
 }
 
@@ -168,13 +177,13 @@ void extract(mp4v2::impl::MP4Track *track)
         putCue(cue, timescale);
 }
 
-void execute(const char *infile)
+void execute(const char *infile, int track)
 {
     try {
         mp4v2::impl::log.setVerbosity(MP4_LOG_NONE);
         mp4v2::impl::MP4File file;
         file.Read(infile, 0);
-        int tid = findVTTTextTrack(file);
+        int tid = findVTTTextTrack(file, track);
         if (tid == 0) {
             throw std::runtime_error("VTT text track is not found");
         }
@@ -188,16 +197,35 @@ void execute(const char *infile)
     }
 }
 
+void usage()
+{
+    std::fprintf(stderr, "usage: mp4vttextract [-t TRACK] IN.mp4 [OUT.vtt]\n");
+}
+
 int main(int argc, char **argv)
 {
     try {
-        if (argc == 1) {
-            std::fprintf(stderr, "usage: mp4vttextract IN.mp4 [OUT.vtt]\n");
+        int c;
+        int track = 0;
+        while ((c = getopt(argc, argv, "t:")) != -1) {
+            switch (c) {
+            case 't':
+                track = atoi(optarg);
+                break;
+            default:
+                usage();
+                return 1;
+            }
+        }
+        argc -= optind;
+        argv += optind;
+        if (argc == 0) {
+            usage();
             return 1;
         }
-        if (argv[2])
-            std::freopen(argv[2], "w", stdout);
-        execute(argv[1]);
+        if (argv[1])
+            std::freopen(argv[1], "w", stdout);
+        execute(argv[0], track);
         return 0;
     } catch (const std::exception &e) {
         std::fprintf(stderr, "%s\n", e.what());
